@@ -59,14 +59,21 @@ def get_transformation_hash(
     nodes: Sequence[BaseNode], transformation: TransformComponent
 ) -> str:
     """Get the hash of a transformation."""
-    # Hash each node individually (including its id) before concatenating, so the
-    # combined string can't be produced by two different node lists: fixed-length
-    # digests can't be split ambiguously the way raw, unseparated content can, and
-    # including the id ties the cached result's identity to the key that looks it up.
+    # Hash each node individually (including its identity) before concatenating,
+    # so the combined string can't be produced by two different node lists:
+    # fixed-length digests can't be split ambiguously the way raw, unseparated
+    # content can, and including identity ties the cached result to the key that
+    # looks it up. Use the source document's id (falling back to the node's own
+    # id for a node with no SOURCE relationship, i.e. a top-level document) rather
+    # than the node's own id_: intermediate nodes produced by a splitter get a
+    # fresh id_ from the default `id_func` on every run even when their content
+    # is unchanged, so keying on node.id_ would make a later stage's cache entry
+    # (e.g. an embedder's) miss whenever an earlier stage's cache entry expired
+    # and had to be recomputed, even though nothing about the content changed.
     nodes_str = "".join(
         [
             sha256(
-                f"{node.id_}-{node.get_content(metadata_mode=MetadataMode.ALL)}".encode(
+                f"{node.source_node.node_id if node.source_node else node.id_}-{node.get_content(metadata_mode=MetadataMode.ALL)}".encode(
                     "utf-8"
                 )
             ).hexdigest()
