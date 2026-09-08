@@ -274,27 +274,26 @@ class BasicMCPClient(ClientSession):
                     await session.initialize()
                     yield session
 
-    def _configure_tool_call_logs_callback(self) -> io.StringIO:
-        handler = io.StringIO()
-        stream_handler = logging.StreamHandler(handler)
-
-        # Configure logging to capture all events
-        logging.basicConfig(
-            level=logging.DEBUG,  # Capture all log levels
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s\n",
-            handlers=[
-                stream_handler,
-            ],
+    def _configure_tool_call_logs_callback(
+        self,
+    ) -> Tuple[io.StringIO, logging.Handler, List[Tuple[logging.Logger, int]]]:
+        stream = io.StringIO()
+        stream_handler = logging.StreamHandler(stream)
+        stream_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s\n")
         )
-        # Also enable logging for specific MCP components
-        mcp_logger = logging.getLogger("mcp")
-        mcp_logger.setLevel(logging.DEBUG)
 
-        # Enable HTTP transport logging to see network details
-        http_logger = logging.getLogger("httpx")
-        http_logger.setLevel(logging.DEBUG)
+        # Attach the handler directly to the relevant loggers instead of using
+        # logging.basicConfig(), which is a no-op once the root logger already
+        # has handlers (e.g. in apps that configure logging themselves).
+        previous_levels = []
+        for logger_name in ("mcp", "httpx"):
+            logger = logging.getLogger(logger_name)
+            previous_levels.append((logger, logger.level))
+            logger.addHandler(stream_handler)
+            logger.setLevel(logging.DEBUG)
 
-        return handler
+        return stream, stream_handler, previous_levels
 
     # Tool methods
     async def call_tool(
@@ -306,20 +305,32 @@ class BasicMCPClient(ClientSession):
         """Call a tool on the MCP server."""
         if self.tool_call_logs_callback is not None:
             # we use a string stream so that we can recover all logs at the end of the session
-            handler = self._configure_tool_call_logs_callback()
+            (
+                handler,
+                stream_handler,
+                previous_levels,
+            ) = self._configure_tool_call_logs_callback()
+            try:
+                async with self._run_session() as session:
+                    result = await session.call_tool(
+                        tool_name,
+                        arguments=arguments,
+                        progress_callback=progress_callback,
+                    )
 
-            async with self._run_session() as session:
-                result = await session.call_tool(
-                    tool_name, arguments=arguments, progress_callback=progress_callback
-                )
+                    # get all logs by dividing the string with \n, since the format of the log has an \n at the end of the log message
+                    extra_values = handler.getvalue().split("\n")
 
-                # get all logs by dividing the string with \n, since the format of the log has an \n at the end of the log message
-                extra_values = handler.getvalue().split("\n")
+                    # pipe the logs list into tool_call_logs_callback
+                    await self.tool_call_logs_callback(extra_values)
 
-                # pipe the logs list into tool_call_logs_callback
-                await self.tool_call_logs_callback(extra_values)
-
-                return result
+                    return result
+            finally:
+                # detach the temporary handler and restore prior logger levels
+                # so this call doesn't permanently change global logging config
+                for logger, previous_level in previous_levels:
+                    logger.removeHandler(stream_handler)
+                    logger.setLevel(previous_level)
         else:
             async with self._run_session() as session:
                 return await session.call_tool(

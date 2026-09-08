@@ -1,3 +1,4 @@
+import logging
 import os
 from httpx2 import AsyncClient
 import pytest
@@ -211,6 +212,56 @@ async def test_long_running_task(client: BasicMCPClient):
     assert current_progress == 3.0
     assert current_progress == expected_total
     assert current_message == "Processing step 3/3"
+
+
+def test_configure_tool_call_logs_callback_ignores_prior_basicConfig(
+    client: BasicMCPClient,
+):
+    """
+    The capture must not rely on logging.basicConfig(), which is a no-op
+    once the root logger already has handlers (e.g. an app that configured
+    logging before constructing the client).
+    """
+    logging.basicConfig(level=logging.INFO, force=True)
+
+    stream, stream_handler, previous_levels = (
+        client._configure_tool_call_logs_callback()
+    )
+    try:
+        logging.getLogger("mcp").debug("mcp-debug-message")
+        assert "mcp-debug-message" in stream.getvalue()
+    finally:
+        for logger, previous_level in previous_levels:
+            logger.removeHandler(stream_handler)
+            logger.setLevel(previous_level)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_restores_logging_state(client: BasicMCPClient):
+    """
+    Enabling tool_call_logs_callback must not leak handlers or leave the
+    mcp/httpx loggers permanently at DEBUG after the call completes.
+    """
+    mcp_logger = logging.getLogger("mcp")
+    httpx_logger = logging.getLogger("httpx")
+    original_mcp_level = mcp_logger.level
+    original_httpx_level = httpx_logger.level
+    original_mcp_handlers = list(mcp_logger.handlers)
+    original_httpx_handlers = list(httpx_logger.handlers)
+
+    async def logs_callback(logs):
+        pass
+
+    client.tool_call_logs_callback = logs_callback
+    try:
+        await client.call_tool("echo", {"message": "hi"})
+    finally:
+        client.tool_call_logs_callback = None
+
+    assert mcp_logger.level == original_mcp_level
+    assert httpx_logger.level == original_httpx_level
+    assert mcp_logger.handlers == original_mcp_handlers
+    assert httpx_logger.handlers == original_httpx_handlers
 
 
 @pytest.mark.asyncio
