@@ -30,6 +30,28 @@ def test_cache() -> None:
     assert cache.get(new_hash) is None
 
 
+def test_get_transformation_hash_is_injective() -> None:
+    transformation = DummyTransform()
+
+    # Splitting the same combined text at a different node boundary must not
+    # collide: ["ab", "c"] and ["a", "bc"] previously hashed identically because
+    # node contents were concatenated with no separator.
+    nodes_ab_c = [TextNode(id_="1", text="ab"), TextNode(id_="2", text="c")]
+    nodes_a_bc = [TextNode(id_="3", text="a"), TextNode(id_="4", text="bc")]
+    assert get_transformation_hash(
+        nodes_ab_c, transformation
+    ) != get_transformation_hash(nodes_a_bc, transformation)
+
+    # Two distinct documents with identical content must not hash the same,
+    # since the cached value carries node identity (id_, ref_doc_id) that the
+    # key must also depend on.
+    node_a = TextNode(id_="doc_a", text="same content")
+    node_b = TextNode(id_="doc_b", text="same content")
+    assert get_transformation_hash([node_a], transformation) != get_transformation_hash(
+        [node_b], transformation
+    )
+
+
 def test_cache_clear() -> None:
     cache = IngestionCache()
     transformation = DummyTransform()

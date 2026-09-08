@@ -59,8 +59,19 @@ def get_transformation_hash(
     nodes: Sequence[BaseNode], transformation: TransformComponent
 ) -> str:
     """Get the hash of a transformation."""
+    # Hash each node individually (including its id) before concatenating, so the
+    # combined string can't be produced by two different node lists: fixed-length
+    # digests can't be split ambiguously the way raw, unseparated content can, and
+    # including the id ties the cached result's identity to the key that looks it up.
     nodes_str = "".join(
-        [str(node.get_content(metadata_mode=MetadataMode.ALL)) for node in nodes]
+        [
+            sha256(
+                f"{node.id_}-{node.get_content(metadata_mode=MetadataMode.ALL)}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            for node in nodes
+        ]
     )
 
     transformation_dict = transformation.to_dict()
