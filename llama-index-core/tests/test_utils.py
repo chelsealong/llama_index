@@ -353,3 +353,43 @@ def test_get_cache_dir_env_var_precedence(tmp_path, monkeypatch) -> None:
         mock_user_cache_dir.return_value = "/should/not/be/used"
         get_cache_dir()
         mock_user_cache_dir.assert_not_called()
+
+
+def test_download_nltk_data_bounds_socket_timeout(tmp_path, monkeypatch) -> None:
+    """
+    nltk.download() has no timeout of its own, so an unreachable download
+    endpoint would otherwise block the calling process indefinitely. Each
+    download call must run with a bounded socket default timeout in effect.
+    """
+    import socket
+
+    from llama_index.core.utils import GlobalsHelper, NLTK_DOWNLOAD_TIMEOUT_SECONDS
+
+    helper = GlobalsHelper()
+    helper._nltk_data_dir = str(tmp_path)
+
+    seen_timeouts = []
+
+    def fake_find(*args, **kwargs):
+        raise LookupError
+
+    def fake_download(*args, **kwargs):
+        seen_timeouts.append(socket.getdefaulttimeout())
+
+    monkeypatch.setattr("nltk.data.find", fake_find)
+    monkeypatch.setattr("nltk.download", fake_download)
+
+    original_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(None)
+    try:
+        helper._download_nltk_data()
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+    # One call for stopwords, one for punkt_tab, both timeout-bounded.
+    assert seen_timeouts == [
+        NLTK_DOWNLOAD_TIMEOUT_SECONDS,
+        NLTK_DOWNLOAD_TIMEOUT_SECONDS,
+    ]
+    # The process-wide default must be restored once downloads complete.
+    assert socket.getdefaulttimeout() is None

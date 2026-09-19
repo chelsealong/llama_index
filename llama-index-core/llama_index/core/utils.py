@@ -41,6 +41,25 @@ if TYPE_CHECKING:
     from nltk.tokenize import PunktSentenceTokenizer
 
 
+# nltk.download() has no timeout of its own and otherwise blocks on the
+# process-wide socket default (unbounded), so an unreachable download
+# endpoint can hang the caller indefinitely. Bound it explicitly.
+NLTK_DOWNLOAD_TIMEOUT_SECONDS = 30
+
+
+@contextmanager
+def _nltk_download_socket_timeout() -> Generator[None, None, None]:
+    """Temporarily cap the socket default timeout for an NLTK download."""
+    import socket
+
+    previous_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(NLTK_DOWNLOAD_TIMEOUT_SECONDS)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
+
+
 class GlobalsHelper:
     """Helper to retrieve globals with asynchronous NLTK data loading."""
 
@@ -90,13 +109,15 @@ class GlobalsHelper:
             try:
                 nltk_find("corpora/stopwords", paths=[self._nltk_data_dir])
             except LookupError:
-                download("stopwords", download_dir=self._nltk_data_dir, quiet=True)
+                with _nltk_download_socket_timeout():
+                    download("stopwords", download_dir=self._nltk_data_dir, quiet=True)
 
             # Download punkt tokenizer
             try:
                 nltk_find("tokenizers/punkt_tab", paths=[self._nltk_data_dir])
             except LookupError:
-                download("punkt_tab", download_dir=self._nltk_data_dir, quiet=True)
+                with _nltk_download_socket_timeout():
+                    download("punkt_tab", download_dir=self._nltk_data_dir, quiet=True)
 
         except Exception as e:
             print(f"NLTK download error: {e}")
