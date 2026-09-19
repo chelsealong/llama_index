@@ -6,6 +6,7 @@ import inspect
 import os
 import random
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -46,18 +47,36 @@ if TYPE_CHECKING:
 # endpoint can hang the caller indefinitely. Bound it explicitly.
 NLTK_DOWNLOAD_TIMEOUT_SECONDS = 30
 
+# Guards the urlopen patch below so overlapping downloads (e.g. from
+# concurrent threads warming stopwords/punkt for the first time) serialize
+# instead of racing each other's patch/restore of nltk.downloader.urlopen.
+_nltk_download_lock = threading.Lock()
+
 
 @contextmanager
 def _nltk_download_socket_timeout() -> Generator[None, None, None]:
-    """Temporarily cap the socket default timeout for an NLTK download."""
-    import socket
+    """
+    Bound an NLTK download to a fixed timeout without touching the
+    process-wide socket default, which is shared by any other code running
+    concurrently in the same process. Instead, patch the `urlopen` reference
+    nltk.downloader uses internally so only NLTK's own request gets an
+    explicit timeout, and hold a lock for the duration so two overlapping
+    downloads can't clobber each other's patch.
+    """
+    import nltk.downloader
 
-    previous_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(NLTK_DOWNLOAD_TIMEOUT_SECONDS)
-    try:
-        yield
-    finally:
-        socket.setdefaulttimeout(previous_timeout)
+    with _nltk_download_lock:
+        original_urlopen = nltk.downloader.urlopen
+
+        def _urlopen_with_timeout(*args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("timeout", NLTK_DOWNLOAD_TIMEOUT_SECONDS)
+            return original_urlopen(*args, **kwargs)
+
+        nltk.downloader.urlopen = _urlopen_with_timeout
+        try:
+            yield
+        finally:
+            nltk.downloader.urlopen = original_urlopen
 
 
 class GlobalsHelper:

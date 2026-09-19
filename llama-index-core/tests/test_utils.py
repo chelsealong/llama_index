@@ -359,9 +359,11 @@ def test_download_nltk_data_bounds_socket_timeout(tmp_path, monkeypatch) -> None
     """
     nltk.download() has no timeout of its own, so an unreachable download
     endpoint would otherwise block the calling process indefinitely. Each
-    download call must run with a bounded socket default timeout in effect.
+    download call must run with nltk's own `urlopen` patched to enforce a
+    timeout -- scoped to just that call, not the process-wide socket
+    default, which would affect unrelated concurrent network code.
     """
-    import socket
+    import nltk.downloader
 
     from llama_index.core.utils import GlobalsHelper, NLTK_DOWNLOAD_TIMEOUT_SECONDS
 
@@ -370,26 +372,89 @@ def test_download_nltk_data_bounds_socket_timeout(tmp_path, monkeypatch) -> None
 
     seen_timeouts = []
 
+    def fake_base_urlopen(*args, **kwargs):
+        seen_timeouts.append(kwargs.get("timeout"))
+        raise RuntimeError("network disabled in test")
+
     def fake_find(*args, **kwargs):
         raise LookupError
 
     def fake_download(*args, **kwargs):
-        seen_timeouts.append(socket.getdefaulttimeout())
+        # Mirrors what nltk.downloader does internally: call its module-level
+        # `urlopen`, which _download_nltk_data must have patched to bound
+        # the timeout for the duration of this call.
+        try:
+            nltk.downloader.urlopen("https://example.invalid/data")
+        except RuntimeError:
+            pass
 
+    monkeypatch.setattr(nltk.downloader, "urlopen", fake_base_urlopen)
     monkeypatch.setattr("nltk.data.find", fake_find)
     monkeypatch.setattr("nltk.download", fake_download)
 
-    original_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(None)
-    try:
-        helper._download_nltk_data()
-    finally:
-        socket.setdefaulttimeout(original_timeout)
+    helper._download_nltk_data()
 
     # One call for stopwords, one for punkt_tab, both timeout-bounded.
     assert seen_timeouts == [
         NLTK_DOWNLOAD_TIMEOUT_SECONDS,
         NLTK_DOWNLOAD_TIMEOUT_SECONDS,
     ]
-    # The process-wide default must be restored once downloads complete.
-    assert socket.getdefaulttimeout() is None
+    # The patch must not leak past the context manager.
+    assert nltk.downloader.urlopen is fake_base_urlopen
+
+
+def test_nltk_download_socket_timeout_does_not_affect_unrelated_urlopen(
+    monkeypatch,
+) -> None:
+    """
+    Unlike mutating socket.setdefaulttimeout(), patching nltk's own urlopen
+    reference must not change the timeout observed by unrelated concurrent
+    network code in the same process.
+    """
+    import socket
+
+    from llama_index.core.utils import _nltk_download_socket_timeout
+
+    original_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(300)
+    try:
+        with _nltk_download_socket_timeout():
+            assert socket.getdefaulttimeout() == 300
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+
+def test_nltk_download_socket_timeout_serializes_concurrent_downloads() -> None:
+    """
+    Two overlapping downloads must not race each other's patch/restore of
+    nltk.downloader.urlopen -- the lock ensures the second caller waits for
+    the first to fully finish (including restoring the original urlopen)
+    before it patches urlopen itself, and vice versa.
+    """
+    import threading
+
+    import nltk.downloader
+
+    from llama_index.core.utils import _nltk_download_socket_timeout
+
+    original_urlopen = nltk.downloader.urlopen
+    observed_patched = []
+
+    def worker(hold_seconds: float) -> None:
+        with _nltk_download_socket_timeout():
+            observed_patched.append(nltk.downloader.urlopen is not original_urlopen)
+            time.sleep(hold_seconds)
+            # Still patched with *our own* wrapper right before exiting,
+            # i.e. the other thread hasn't restored it out from under us.
+            observed_patched.append(nltk.downloader.urlopen is not original_urlopen)
+
+    t1 = threading.Thread(target=worker, args=(0.2,))
+    t2 = threading.Thread(target=worker, args=(0.0,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert observed_patched == [True, True, True, True]
+    # Restored once both downloads complete.
+    assert nltk.downloader.urlopen is original_urlopen
