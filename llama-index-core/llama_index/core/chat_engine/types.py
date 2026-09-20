@@ -44,8 +44,25 @@ def is_function(message: ChatMessage) -> bool:
 
 
 def _set_message_content(message: ChatMessage, content: str) -> None:
-    """Update streamed message text without using the legacy content setter."""
-    message.blocks = [TextBlock(text=content)]
+    """
+    Update streamed message text without using the legacy content setter.
+
+    Preserves any non-text blocks (e.g. ThinkingBlock, ToolCallBlock,
+    CitationBlock) already present on the message, in their original
+    sequence, only replacing or appending the text block.
+    """
+    new_blocks = []
+    replaced = False
+    for block in message.blocks:
+        if isinstance(block, TextBlock):
+            if not replaced:
+                new_blocks.append(TextBlock(text=content))
+                replaced = True
+        else:
+            new_blocks.append(block)
+    if not replaced:
+        new_blocks.append(TextBlock(text=content))
+    message.blocks = new_blocks
 
 
 class ChatResponseMode(str, Enum):

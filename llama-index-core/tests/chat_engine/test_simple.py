@@ -7,6 +7,8 @@ from llama_index.core.base.llms.types import (
     CompletionResponse,
     CompletionResponseGen,
     TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
 )
 from typing import Any, AsyncIterator, Iterator
 from llama_index.core.llms.callbacks import llm_completion_callback
@@ -135,6 +137,29 @@ async def test_streaming_response_awrite_history_handles_multiblock_message():
 
     assert memory.messages == [message]
     assert message.blocks == [TextBlock(text="new text")]
+
+
+def test_streaming_response_write_history_preserves_non_text_blocks():
+    thinking = ThinkingBlock(content="Evaluating...")
+    tool_call = ToolCallBlock(
+        tool_name="calculator", tool_kwargs={"expression": "2 + 2"}
+    )
+    message = ChatMessage(
+        role=MessageRole.ASSISTANT,
+        blocks=[thinking, tool_call, TextBlock(text="old text")],
+    )
+
+    def chat_stream() -> Iterator[ChatResponse]:
+        yield ChatResponse(message=message, delta="new ")
+        yield ChatResponse(message=message, delta="text")
+
+    memory = MockMemory()
+    response = StreamingAgentChatResponse(chat_stream=chat_stream())
+
+    response.write_response_to_history(memory)  # type: ignore[arg-type]
+
+    assert memory.messages == [message]
+    assert message.blocks == [thinking, tool_call, TextBlock(text="new text")]
 
 
 def test_simple_chat_engine_astream_exception_handling():
