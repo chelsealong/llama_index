@@ -166,6 +166,20 @@ async def test_async_acquire_tpm_limiting() -> None:
         mock_sleep.assert_called_once()
 
 
+def test_acquire_raises_when_num_tokens_exceeds_capacity() -> None:
+    """A single request larger than the bucket capacity must fail fast, not deadlock."""
+    rl = RateLimiter(tokens_per_minute=100)
+    with pytest.raises(ValueError, match="can never be satisfied"):
+        rl.acquire(num_tokens=200)
+
+
+@pytest.mark.asyncio
+async def test_async_acquire_raises_when_num_tokens_exceeds_capacity() -> None:
+    rl = RateLimiter(tokens_per_minute=100)
+    with pytest.raises(ValueError, match="can never be satisfied"):
+        await rl.async_acquire(num_tokens=200)
+
+
 @pytest.mark.asyncio
 async def test_concurrent_async_rate_limiting() -> None:
     """Multiple concurrent async_acquire calls must all complete."""
@@ -399,6 +413,22 @@ def test_sliding_window_tpm_blocks_when_exceeded() -> None:
         rl.acquire(num_tokens=50)
         mock_sleep.assert_called_once()
         assert mock_sleep.call_args[0][0] >= 9.0
+
+
+def test_sliding_window_acquire_raises_when_num_tokens_exceeds_cap() -> None:
+    """A single oversize request must raise instead of silently exceeding the cap."""
+    rl = SlidingWindowRateLimiter(tokens_per_minute=100)
+    with pytest.raises(ValueError, match="can never be satisfied"):
+        rl.acquire(num_tokens=200)
+
+
+@pytest.mark.asyncio
+async def test_sliding_window_async_acquire_raises_when_num_tokens_exceeds_cap() -> (
+    None
+):
+    rl = SlidingWindowRateLimiter(tokens_per_minute=100)
+    with pytest.raises(ValueError, match="can never be satisfied"):
+        await rl.async_acquire(num_tokens=200)
 
 
 def test_sliding_window_request_burst_allows_additional_requests() -> None:

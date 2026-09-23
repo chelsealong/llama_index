@@ -156,15 +156,18 @@ class TokenBucketRateLimiter(BaseRateLimiter, BaseModel):
                 wait,
                 (1.0 - self._request_tokens) / self._request_refill_rate,
             )
-        if (
-            self.tokens_per_minute is not None
-            and num_tokens > 0
-            and self._token_tokens < num_tokens
-        ):
-            wait = max(
-                wait,
-                (num_tokens - self._token_tokens) / self._token_refill_rate,
-            )
+        if self.tokens_per_minute is not None and num_tokens > 0:
+            if num_tokens > self._token_max_tokens:
+                raise ValueError(
+                    f"Requested num_tokens={num_tokens} exceeds the configured "
+                    f"tokens_per_minute={self._token_max_tokens}; this request "
+                    "can never be satisfied and would block forever."
+                )
+            if self._token_tokens < num_tokens:
+                wait = max(
+                    wait,
+                    (num_tokens - self._token_tokens) / self._token_refill_rate,
+                )
         return wait
 
     def _consume(self, num_tokens: int = 0) -> None:
@@ -330,8 +333,14 @@ class SlidingWindowRateLimiter(BaseRateLimiter, BaseModel):
                     self._request_timestamps[0] + _SLIDING_WINDOW_SECONDS - now,
                 )
         if self.tokens_per_minute is not None and num_tokens > 0:
-            current = self._current_token_usage()
             allowed_tokens = self.tokens_per_minute + self.token_burst
+            if num_tokens > allowed_tokens:
+                raise ValueError(
+                    f"Requested num_tokens={num_tokens} exceeds the configured "
+                    f"tokens_per_minute + token_burst={allowed_tokens}; this "
+                    "request can never be satisfied."
+                )
+            current = self._current_token_usage()
             if current + num_tokens > allowed_tokens:
                 # Must wait until enough token usage expires
                 if not self._token_usage:
